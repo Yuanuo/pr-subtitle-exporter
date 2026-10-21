@@ -1,0 +1,24 @@
+# ---- 编译产物 / 缓存 ----
+/target/
+/dist/
+
+# 用于本地测试的真实 Premiere 工程（含本机绝对路径，不适合公开）
+*.prproj
+# 导出结果（测试时默认落在工程目录）
+/*.srt
+/*.ass
+
+# ---- 编辑器 / 系统噪声 ----
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 构建中途产物 ----
+*.old.exe
+*.pdb
+*.exp
+*.lib
