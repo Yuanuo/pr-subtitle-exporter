@@ -13,11 +13,22 @@ const GRAY: Color32 = Color32::from_rgb(140, 145, 152);
 const RED: Color32 = Color32::from_rgb(196, 62, 62);
 const BLUE: Color32 = Color32::from_rgb(45, 110, 200);
 const AMBER: Color32 = Color32::from_rgb(176, 128, 24);
+/// 次级按钮 / 步骤编号的底色与文字色（浅色主题）
+const BLUE_SOFT: Color32 = Color32::from_rgb(230, 241, 251);
+const BLUE_TEXT: Color32 = Color32::from_rgb(24, 95, 165);
+/// 深色主题下的同款配色
+const BLUE_SOFT_DARK: Color32 = Color32::from_rgb(20, 52, 84);
+const BLUE_TEXT_DARK: Color32 = Color32::from_rgb(181, 212, 244);
 
 /// 合并稿在队列里的「轨道」列显示名
 pub const MERGED_TRACK_LABEL: &str = "合并";
 /// 合并稿追加到文件名尾部的标记（位于用户自定义后缀之前）
 pub const MERGED_FILE_MARK: &str = "_合并";
+
+/// 左侧 Shift 操作的说明（平时收在标题右侧的「?」里）
+const SHIFT_HINT: &str = "按住 Shift 点击：\
+                          目录 / 序列 = 同一层级整批切换；\
+                          字幕轨道 = 本工程里同名轨道一起切换";
 
 // ---------------------------------------------------------------- 数据模型
 
@@ -102,7 +113,6 @@ enum Msg {
 
 enum Act {
     RemoveProject(usize),
-    Analyze(usize),
     SelectAllSeqs(bool),
     Preview {
         title: String,
@@ -155,7 +165,7 @@ pub struct App {
     settings_dirty_since: Option<std::time::Instant>,
     /// 当前界面缩放（同步自 egui，Ctrl+/- 也会改它）
     zoom: f32,
-    /// 底栏「③ 导出」上一帧的实际高度（用来给队列区预留空间）
+    /// 底栏「③ 导出」上一帧的高度：只在高度变化时补一帧重绘，避免布局停在迟一帧的状态
     export_bar_h: f32,
 }
 
@@ -733,7 +743,6 @@ impl App {
                     self.log(format!("已从列表移除《{}》。", p.name));
                 }
             }
-            Act::Analyze(id) => self.spawn_analyze(id, ctx, false),
             Act::SelectAllSeqs(v) => {
                 for p in self.projects.iter_mut() {
                     for s in p.seqs.iter_mut() {
@@ -841,10 +850,12 @@ impl eframe::App for App {
             self.spawn_export(ctx);
         }
 
-        // ---- 顶部工具栏：只放界面缩放与状态；工程的添加/清空归到左侧 ① 导入
+        // ---- 顶部工具栏：左边只放界面缩放，右边放全局状态。
+        // 快捷键提示不常驻（已经写在各个按钮的悬停里），避免顶部堆三坨信息。
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
+                compact(ui);
                 ui.label(RichText::new("界面字号").weak().size(11.0));
                 if ui
                     .small_button("A−")
@@ -867,18 +878,12 @@ impl eframe::App for App {
                 {
                     egui::gui_zoom::zoom_in(ctx);
                 }
-                ui.separator();
                 if !self.cjk_font {
                     ui.colored_label(RED, RichText::new("⚠ 未找到中文字体").size(12.0));
                 }
-                ui.label(
-                    RichText::new("F5 分析 · F6 入队 · F7 导出")
-                        .weak()
-                        .size(11.0),
-                );
-                ui.add_space(6.0);
+                // 状态推到最右边，把顶部右侧那片空白用起来
                 let hint = if self.projects.is_empty() {
-                    "支持把多个 .prproj 直接拖进窗口".to_string()
+                    String::new()
                 } else {
                     format!(
                         "已载入 {} 个工程 · {} 个导出任务",
@@ -886,7 +891,11 @@ impl eframe::App for App {
                         self.tasks.len()
                     )
                 };
-                ui.label(RichText::new(hint).weak().size(12.0));
+                if !hint.is_empty() {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(hint).weak().size(12.0));
+                    });
+                }
             });
             ui.add_space(6.0);
         });
@@ -898,15 +907,22 @@ impl eframe::App for App {
             .min_height(64.0)
             .show(ctx, |ui| {
                 let mut clear = false;
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("日志").strong());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("清空日志").clicked() {
-                            clear = true;
-                        }
+                // 面板默认只有 2px 内边距，标题行几乎贴着上边框；这里自己补一点，
+                // 同时把标题行与分割线之间的间距收紧（下面留白显得太散）
+                ui.add_space(4.0);
+                ui.scope(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.horizontal(|ui| {
+                        compact(ui);
+                        ui.label(RichText::new("日志").strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("清空日志").clicked() {
+                                clear = true;
+                            }
+                        });
                     });
+                    ui.separator();
                 });
-                ui.separator();
                 egui::ScrollArea::vertical()
                     .stick_to_bottom(true)
                     .auto_shrink([false, false])
@@ -930,8 +946,14 @@ impl eframe::App for App {
             .width_range(320.0..=side_max)
             .show(ctx, |ui| {
                 ui.add_space(6.0);
-                ui.label(RichText::new("① 导入 · 工程 / 序列 / 字幕轨道").strong());
-                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    step_chip(ui, 1, "导入 · 工程 / 序列 / 字幕轨道");
+                    // Shift 说明平时不占一整行，收进标题右侧的「?」里
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        hint_mark(ui).on_hover_text(SHIFT_HINT);
+                    });
+                });
+                ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
                     if ui
                         .button("＋ 添加工程")
@@ -960,13 +982,6 @@ impl eframe::App for App {
                         acts.push(Act::SelectAllSeqs(false));
                     }
                 });
-                ui.label(
-                    RichText::new(
-                        "Shift+点击：目录/序列 = 同一层级整批切换；字幕轨道 = 本工程同名轨道一起切换",
-                    )
-                    .weak()
-                    .size(11.5),
-                );
                 ui.separator();
 
                 if self.projects.is_empty() {
@@ -981,17 +996,42 @@ impl eframe::App for App {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         let collapsed = &mut self.collapsed;
-                        for p in self.projects.iter_mut() {
-                            project_card(ui, p, &mut acts, collapsed);
-                            ui.add_space(8.0);
+                        let count = self.projects.len();
+                        for (i, p) in self.projects.iter_mut().enumerate() {
+                            // 最后一张卡片吃掉剩下的高度，让树的边框一直撑到底；
+                            // 否则工程少的时候卡片下面会空出一大块。
+                            // 留 5pt（+ 侧栏自己的 2pt 下内边距 = 7pt）是为了让卡片底边
+                            // 和右边 ③ 的底边落在同一条线上。
+                            let last = i + 1 == count;
+                            let fill_h = if last {
+                                (ui.available_height() - 5.0).max(0.0)
+                            } else {
+                                0.0
+                            };
+                            project_card(ui, p, &mut acts, collapsed, fill_h);
+                            if !last {
+                                ui.add_space(8.0);
+                            }
                         }
-                        ui.add_space(6.0);
                     });
             });
 
-        // ---- 中央：三段式 —— 上「② 加入队列」 / 中「队列」 / 下「③ 导出」
-        // 三段都画在同一个 ui 里（下面用底对齐子布局），宽度天然一致。
-        egui::CentralPanel::default().show(ctx, |ui| {
+        // ---- 中央：上「② 队列」 / 下「③ 导出」两块。
+        // ③ 用 bottom 面板先把自己的高度量走，② 再占满剩下的部分，
+        // 两块的外框就都能贴着窗口边缘（顺序反过来的话得靠猜高度，底部会留白）。
+        //
+        // CentralPanel 默认四边都是 8pt 内边距，上下这两条会让 ② 的框离工具栏、
+        // ③ 的框离日志面板各空出一大截（比左右宽得多）。这里把上下收紧，
+        // 让三个方向的外边距看起来差不多；左右维持 8pt，和侧栏分隔线保持距离。
+        let central_frame = egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin {
+            left: 8.0,
+            right: 8.0,
+            top: 2.0,
+            bottom: 3.0,
+        });
+        egui::CentralPanel::default()
+            .frame(central_frame)
+            .show(ctx, |ui| {
             let pending = self
                 .tasks
                 .iter()
@@ -1013,12 +1053,175 @@ impl eframe::App for App {
                 })
                 .sum();
 
+            // ==== 下：③ 导出 —— 先用「底部面板」把底部这块高度占下来，
+            // 上面的 ② 才能吃掉剩下的全部高度。以前是拿「上一帧量到的底栏高度」
+            // 反推队列高度，量偏一点就会在 ③ 下面留一条空白。
+            //
+            // 底部面板会把自己的裁剪区设成正好等于面板矩形，而 ③ 的外框又正好贴着
+            // 这个矩形画，1pt 的细描边有一半落在裁剪区外，左 / 右 / 下三条边就被整条
+            // 削掉（顶边在框中间反而不受影响）。所以这里两手都用上：
+            //   · 面板底部留 4pt，让外框离开裁剪边界（顺带和左侧卡片底边对齐）；
+            //   · 裁剪区左右各放宽 2pt，让贴边的左右两条竖线也能画完整。
+            let bar_frame = egui::Frame::none().inner_margin(egui::Margin {
+                bottom: 4.0,
+                ..Default::default()
+            });
+            let bar = egui::TopBottomPanel::bottom("export_bar")
+                .frame(bar_frame)
+                .show_separator_line(false)
+                .default_height(112.0)
+                .show_inside(ui, |ui| {
+                    ui.set_clip_rect(ui.clip_rect().expand(2.0));
+                    ui.add_space(6.0);
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+
+                        // 第一行：标题 + 输出目录（自动 / 自定义 二选一）
+                        ui.horizontal_wrapped(|ui| {
+                            step_chip(ui, 3, "导出")
+                                .on_hover_text("输出目录与内容处理选项在写文件时才生效");
+                            ui.add_space(2.0);
+                            ui.label(RichText::new("输出目录").weak().size(12.0));
+
+                            let before = self.output_dir_touched;
+                            let mut touched = before;
+                            ui.radio_value(&mut touched, false, "自动")
+                                .on_hover_text("跟随工程文件所在的文件夹（换工程时会自动跟着换）");
+                            ui.radio_value(&mut touched, true, "自定义")
+                                .on_hover_text("固定导出到下面这个目录");
+                            if touched != before {
+                                self.output_dir_touched = touched;
+                                if !touched {
+                                    // 切回「自动」：立刻换成第一个工程所在目录
+                                    self.output_dir = self
+                                        .projects
+                                        .first()
+                                        .and_then(|p| p.path.parent().map(|d| d.to_path_buf()))
+                                        .unwrap_or_else(default_output_dir);
+                                }
+                            }
+
+                            let full = self.output_dir.display().to_string();
+                            let shown = tail_path(&full, if self.output_dir_touched { 34 } else { 26 });
+                            // 自定义目录用正常文字色突出，自动模式淡一点表示「跟着工程走」
+                            let path_color = if self.output_dir_touched {
+                                ui.visuals().text_color()
+                            } else {
+                                GRAY
+                            };
+                            // truncate：空间不够时打省略号，而不是换行把这一行撑高
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(shown).monospace().size(11.5).color(path_color),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(full);
+                            if ui
+                                .small_button("选择…")
+                                .on_hover_text("选完会自动切到「自定义」")
+                                .clicked()
+                            {
+                                let start = self.output_dir.clone();
+                                if let Some(dir) = rfd::FileDialog::new().set_directory(&start).pick_folder() {
+                                    self.output_dir = dir;
+                                    self.output_dir_touched = true;
+                                }
+                            }
+                            if ui.small_button("打开").clicked() {
+                                let dir = self.output_dir.clone();
+                                let _ = std::fs::create_dir_all(&dir);
+                                let _ = std::process::Command::new("explorer").arg(dir).spawn();
+                            }
+                        });
+
+                        // 第二行：内容处理选项（数量不多，直接平铺更省一次点击）
+                        ui.horizontal_wrapped(|ui| {
+                            ui.checkbox(&mut self.skip_empty, "跳过空字幕")
+                                .on_hover_text("忽略没有任何文字的条目（空字幕没有意义）");
+                            ui.checkbox(&mut self.write_bom, "SRT 写 BOM").on_hover_text(
+                                "让 SRT 以 UTF-8 BOM 开头；部分老旧播放器/剪辑软件识别中文需要 BOM",
+                            );
+                            // 与前面的「选择…」「打开」保持同一种小按钮外观
+                            if ui
+                                .small_button("ASS 模板…")
+                                .on_hover_text("编辑、保存 ASS 模板（改动后需点保存）")
+                                .clicked()
+                            {
+                                self.show_template_editor = true;
+                            }
+                            if self.template_dirty {
+                                ui.label(RichText::new("模板有未保存的修改").color(AMBER).size(11.5));
+                            }
+                        });
+
+                        // 第三行：左边状态，右边主按钮（主操作贴右下）。
+                        // 状态文字先放进一个与主按钮等高的居中区域，再画按钮——
+                        // 若直接顺序画，label 会按「当时行高」顶在上面，按钮把行撑高后显得不对齐。
+                        ui.horizontal(|ui| {
+                            let btn_size = egui::vec2(190.0, 40.0);
+                            let left_w = (ui.available_width() - btn_size.x - 9.0).max(120.0);
+                            let hint = if pending > 0 {
+                                format!("待导出 {pending} 个任务")
+                            } else if self.tasks.is_empty() {
+                                "队列为空：先在 ② 里把勾选的轨道加入队列".to_string()
+                            } else {
+                                "没有待导出的任务（已全部完成）".to_string()
+                            };
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(left_w, btn_size.y),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    // truncate：空间不够打省略号，不能伸到右边主按钮底下
+                                    ui.add(
+                                        egui::Label::new(RichText::new(hint).weak().size(12.0))
+                                            .truncate(),
+                                    );
+                                    if self.busy > 0 {
+                                        ui.spinner();
+                                        ui.label(RichText::new("处理中…").weak().size(12.0));
+                                    }
+                                },
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let can_export = pending > 0;
+                                let label = RichText::new("开始导出").strong().size(15.0);
+                                let label = if can_export {
+                                    label.color(Color32::WHITE)
+                                } else {
+                                    label
+                                };
+                                let mut export_btn = egui::Button::new(label).min_size(btn_size);
+                                if can_export {
+                                    export_btn = export_btn
+                                        .fill(BLUE)
+                                        .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(28, 78, 150)));
+                                }
+                                if ui
+                                    .add_enabled(can_export, export_btn)
+                                    .on_hover_text(format!("只写出队列中待导出的 {pending} 个任务（F7）"))
+                                    .clicked()
+                                {
+                                    acts.push(Act::Export);
+                                }
+                            });
+                        });
+                    });
+                });
+            // 底栏高度变了要补一帧重绘：egui 没有输入就不重绘，
+            // 否则 ② / ③ 的位置会停在「迟一帧」的状态。
+            let bar_h_now = bar.response.rect.height();
+            if (self.export_bar_h - bar_h_now).abs() > 0.5 {
+                ctx.request_repaint();
+            }
+            self.export_bar_h = bar_h_now;
+
             // ==== 上：② 队列 —— 这些选项决定队列里出哪些任务、文件叫什么
             ui.add_space(6.0);
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("② 队列").strong())
+                    step_chip(ui, 2, "队列")
                         .on_hover_text("这一块的选项决定队列里有哪些任务、文件叫什么名字");
                     let selected_tracks = self
                         .projects
@@ -1028,6 +1231,7 @@ impl eframe::App for App {
                         .flat_map(|s| s.tracks.iter())
                         .filter(|t| t.selected)
                         .count();
+                    // 与「＋ 添加工程」统一的普通按钮风格
                     if ui
                         .add_enabled(
                             selected_tracks > 0,
@@ -1036,7 +1240,7 @@ impl eframe::App for App {
                             )),
                         )
                         .on_hover_text(
-                            "勾了多条轨道的序列，还会额外生成 1 个「合并」任务：\
+                            "快捷键 F6。勾了多条轨道的序列，还会额外生成 1 个「合并」任务：\
                              各轨道按时间合并、完全重复的条目只留一条（仅 SRT）",
                         )
                         .clicked()
@@ -1086,22 +1290,8 @@ impl eframe::App for App {
                     )
                     .on_hover_text("追加到文件名尾部；不以 _ - . 开头时会自动补一个下划线");
                 });
-            });
-
-            // ==== 中：队列（高度 = 剩余高度 - 底栏预留）
-            ui.add_space(6.0);
-            let rest_h = ui.available_height();
-            let bar_h = if self.export_bar_h > 0.0 {
-                self.export_bar_h
-            } else {
-                100.0
-            };
-            let queue_h = (rest_h - bar_h - 6.0).max(80.0);
-            egui::Frame::group(ui.style()).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.set_min_height(queue_h - 12.0);
+                ui.add_space(2.0);
                 ui.horizontal_wrapped(|ui| {
-                    // 标题已经在 ② 里了，这里只放统计，避免两个「队列」上下重复
                     ui.label(
                         RichText::new(format!(
                             "{} 个任务 · 待导出 {} · 已完成 {}/{} 条字幕",
@@ -1114,15 +1304,63 @@ impl eframe::App for App {
                         .size(12.0),
                     );
                 });
-                ui.add_space(4.0);
-                let list_h = (queue_h - 52.0).max(40.0);
-                egui::ScrollArea::both()
-                    .max_height(list_h)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
+                // ③ 已经用底部面板把位置占好了，剩下的高度全给列表，
+                // ② 的边框就正好顶到 ③ 的上边，底边不会再留一条空白
+                let list_h = ui.available_height().max(16.0);
+
+                // 关键：列表放进一个「高度固定」的子区域。ScrollArea 的 max_height 只是
+                // 上限提示，真正的可用高度来自父 ui（= 整块中央区），所以队列会越画越高、
+                // 把下面的 ③ 区顶出窗口。allocate_ui 给的是硬尺寸，超出部分只能滚动。
+                let list_w = ui.available_width();
+                ui.allocate_ui(egui::vec2(list_w, list_h), |ui| {
+                    egui::ScrollArea::both()
+                        .auto_shrink([false, false])
+                        // egui 的隐藏下限：内容需要滚动时，滚动区最小 64px 高
+                        // （min_scrolled_size 默认 64）。窗口很矮时队列会硬撑到 64+，
+                        // 把下面的 ③ 区顶出窗口，所以这里放开。
+                        .min_scrolled_height(24.0)
+                        .show(ui, |ui| {
                         if self.tasks.is_empty() {
-                            ui.add_space(20.0);
+                            // 列表区跟着窗口变高，空态提示往中间放，别贴着顶上
+                            let rest = ui.available_height();
+                            ui.add_space(((rest - 120.0) * 0.45).clamp(12.0, 220.0));
                             ui.vertical_centered(|ui| {
+                                // 「字幕条」符号：深色圆角块里两行短条，模仿视频底部的字幕
+                                let (rect, _) =
+                                    ui.allocate_exact_size(egui::vec2(92.0, 54.0), egui::Sense::hover());
+                                let p = ui.painter_at(rect);
+                                p.rect_filled(rect, 6.0, Color32::from_rgb(42, 46, 54));
+                                let (w, h) = (rect.width(), rect.height());
+                                let ink = Color32::from_rgb(148, 154, 166);
+                                p.rect_filled(
+                                    egui::Rect::from_min_max(
+                                        egui::pos2(
+                                            rect.left() + w * 0.18,
+                                            rect.top() + h * 0.36,
+                                        ),
+                                        egui::pos2(
+                                            rect.right() - w * 0.18,
+                                            rect.top() + h * 0.52,
+                                        ),
+                                    ),
+                                    2.0,
+                                    ink,
+                                );
+                                p.rect_filled(
+                                    egui::Rect::from_min_max(
+                                        egui::pos2(
+                                            rect.left() + w * 0.30,
+                                            rect.top() + h * 0.60,
+                                        ),
+                                        egui::pos2(
+                                            rect.right() - w * 0.36,
+                                            rect.top() + h * 0.74,
+                                        ),
+                                    ),
+                                    2.0,
+                                    ink,
+                                );
+                                ui.add_space(4.0);
                                 ui.label(RichText::new("队列还是空的").weak().size(15.0));
                                 ui.label(
                                     RichText::new(
@@ -1133,23 +1371,28 @@ impl eframe::App for App {
                                 );
                             });
                         } else {
+                            // 只有一个工程时不显示「工程」列，多工程时才加上
+                            let cols = if self.projects.len() > 1 { 6 } else { 5 };
                             egui::Grid::new("queue")
-                                .num_columns(7)
+                                .num_columns(cols)
                                 .striped(true)
                                 .spacing([16.0, 6.0])
                                 .show(ui, |ui| {
-                                    header(ui, "工程");
+                                    if self.projects.len() > 1 {
+                                        header(ui, "工程");
+                                    }
                                     header(ui, "序列");
                                     header(ui, "轨道");
                                     header(ui, "条数");
-                                    header(ui, "格式");
                                     header(ui, "输出文件");
                                     header(ui, "状态");
                                     ui.end_row();
 
                                     for t in self.tasks.iter() {
                                         let merged = t.track == MERGED_TRACK_LABEL;
-                                        ui.label(RichText::new(&t.project).size(12.5));
+                                        if self.projects.len() > 1 {
+                                            ui.label(RichText::new(&t.project).size(12.5));
+                                        }
                                         ui.label(RichText::new(&t.seq).size(12.5));
                                         if merged {
                                             ui.label(
@@ -1162,34 +1405,54 @@ impl eframe::App for App {
                                             );
                                         }
                                         ui.label(RichText::new(t.count.to_string()).size(12.5));
-                                        ui.label(
-                                            RichText::new(format_list(t.write_srt, t.write_ass))
-                                                .size(11.5)
-                                                .monospace(),
-                                        );
+                                        // 格式并列进「输出文件」：文件名后面跟扩展名，
+                                        // 省掉单独一列，窄窗口才不会横向滚动
                                         let fname = t
                                             .base_path
                                             .file_name()
                                             .map(|s| s.to_string_lossy().to_string())
                                             .unwrap_or_default();
-                                        ui.label(RichText::new(fname).size(12.0).monospace())
-                                            .on_hover_text(t.base_path.display().to_string());
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 2.0;
+                                            ui.label(
+                                                RichText::new(&fname).size(12.0).monospace(),
+                                            );
+                                            for ext in ["srt", "ass"] {
+                                                let on = if ext == "srt" {
+                                                    t.write_srt
+                                                } else {
+                                                    t.write_ass
+                                                };
+                                                if on {
+                                                    ui.label(
+                                                        RichText::new(format!(".{ext}"))
+                                                            .size(11.0)
+                                                            .monospace()
+                                                            .weak(),
+                                                    );
+                                                }
+                                            }
+                                        })
+                                        .response
+                                        .on_hover_text(t.base_path.display().to_string());
                                         match &t.status {
                                             TStatus::Pending => ui.label(
-                                                RichText::new("待导出").color(AMBER).size(12.0),
+                                                RichText::new("○ 待导出").color(AMBER).size(12.0),
                                             ),
                                             TStatus::Running => ui.label(
-                                                RichText::new("导出中…").color(BLUE).size(12.0),
+                                                RichText::new("● 导出中…").color(BLUE).size(12.0),
                                             ),
                                             TStatus::Done { files, subs } => ui
                                                 .label(
-                                                    RichText::new(format!("完成 · {subs} 条"))
+                                                    RichText::new(format!("● 完成 · {subs} 条"))
                                                         .color(GREEN)
                                                         .size(12.0),
                                                 )
                                                 .on_hover_text(format!("已写出 {files} 个文件")),
                                             TStatus::Failed(e) => ui
-                                                .label(RichText::new("失败").color(RED).size(12.0))
+                                                .label(
+                                                    RichText::new("● 失败").color(RED).size(12.0),
+                                                )
                                                 .on_hover_text(e),
                                         };
                                         ui.end_row();
@@ -1197,84 +1460,8 @@ impl eframe::App for App {
                                 });
                         }
                     });
-            });
-
-            // ==== 下：③ 导出 —— 贴在这一栏的最下面
-            ui.add_space(6.0);
-            let bar = egui::Frame::group(ui.style()).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("③ 导出").strong())
-                        .on_hover_text("输出目录与内容处理选项在写文件时才生效");
-                    // 主操作按钮：加宽 + 蓝底白字，让它在底栏里最显眼
-                    let can_export = pending > 0;
-                    let label = RichText::new("开始导出").strong().size(15.0);
-                    let label = if can_export {
-                        label.color(Color32::WHITE)
-                    } else {
-                        label
-                    };
-                    let mut export_btn = egui::Button::new(label).min_size(egui::vec2(170.0, 30.0));
-                    if can_export {
-                        export_btn = export_btn
-                            .fill(BLUE)
-                            .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(28, 78, 150)));
-                    }
-                    if ui
-                        .add_enabled(can_export, export_btn)
-                        .on_hover_text(format!("只写出队列中待导出的 {pending} 个任务（F7）"))
-                        .clicked()
-                    {
-                        acts.push(Act::Export);
-                    }
-                    if self.busy > 0 {
-                        ui.spinner();
-                        ui.label(RichText::new("处理中…").weak().size(12.0));
-                    }
-                });
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("输出目录").weak().size(12.0));
-                    let full = self.output_dir.display().to_string();
-                    let shown = if self.output_dir_touched {
-                        tail_path(&full, 30)
-                    } else {
-                        format!("（自动：{}）", tail_path(&full, 24))
-                    };
-                    ui.label(RichText::new(shown).monospace().size(11.5))
-                        .on_hover_text(self.output_dir.display().to_string());
-                    if ui.small_button("选择…").clicked() {
-                        let start = self.output_dir.clone();
-                        if let Some(dir) = rfd::FileDialog::new().set_directory(&start).pick_folder() {
-                            self.output_dir = dir;
-                            self.output_dir_touched = true;
-                        }
-                    }
-                    if ui.small_button("打开").clicked() {
-                        let dir = self.output_dir.clone();
-                        let _ = std::fs::create_dir_all(&dir);
-                        let _ = std::process::Command::new("explorer").arg(dir).spawn();
-                    }
-                });
-                ui.horizontal_wrapped(|ui| {
-                    ui.checkbox(&mut self.skip_empty, "跳过空字幕")
-                        .on_hover_text("忽略没有任何文字的条目（空字幕没有意义）");
-                    ui.checkbox(&mut self.write_bom, "SRT 写 BOM").on_hover_text(
-                        "让 SRT 以 UTF-8 BOM 开头；部分老旧播放器/剪辑软件识别中文需要 BOM",
-                    );
-                    if ui
-                        .button("ASS 模板…")
-                        .on_hover_text("编辑、保存 ASS 模板（改动后需点保存）")
-                        .clicked()
-                    {
-                        self.show_template_editor = true;
-                    }
-                    if self.template_dirty {
-                        ui.label(RichText::new("模板有未保存的修改").color(AMBER).size(11.0));
-                    }
                 });
             });
-            // 记下底栏实际高度，下一帧按它给队列留位
-            self.export_bar_h = bar.response.rect.height();
         });
 
         // ---- ASS 模板编辑窗口
@@ -1512,22 +1699,57 @@ fn project_card(
     p: &mut Project,
     acts: &mut Vec<Act>,
     collapsed: &mut std::collections::HashSet<String>,
+    // 卡片外框的最小高度（0 = 按内容自适应）。最后一张卡片由调用方传入
+    // 「剩余高度」，工程树的边框才能一路撑到底。
+    fill_h: f32,
 ) {
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_width(ui.available_width());
+        // group 的内边距上下各 6，传进来的是外框高度，这里换算成内容高度
+        if fill_h > 0.0 {
+            ui.set_min_height((fill_h - 12.0).max(0.0));
+        }
         ui.horizontal(|ui| {
-            ui.label(RichText::new(&p.name).strong().size(14.0));
+            compact(ui);
+            // 完整路径不再单独占一行，收进项目名的悬停提示
+            ui.label(RichText::new(&p.name).strong().size(14.0))
+                .on_hover_text(p.path.display().to_string());
+            // 序列统计紧跟项目名，不再单独占一行
+            if matches!(p.state, PState::Ready) && !p.seqs.is_empty() {
+                let total = p.seqs.len();
+                let n_sel = p.seqs.iter().filter(|s| s.selected).count();
+                ui.label(
+                    RichText::new(format!("{n_sel}/{total} 个序列"))
+                        .weak()
+                        .size(11.0),
+                );
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("×").on_hover_text("从列表移除").clicked() {
                     acts.push(Act::RemoveProject(p.id));
                 }
+                // 全选 / 全不选做成图标按钮（方框内对勾 / 叉），不再占按钮行
+                if icon_button(ui, IconMark::Cross)
+                    .on_hover_text("全不选（含目录子树）")
+                    .clicked()
+                {
+                    for s in p.seqs.iter_mut() {
+                        s.selected = false;
+                    }
+                }
+                if icon_button(ui, IconMark::Check)
+                    .on_hover_text(format!(
+                        "全选（含目录子树），选中后自动分析\n{SHIFT_HINT}"
+                    ))
+                    .clicked()
+                {
+                    for s in p.seqs.iter_mut() {
+                        s.selected = true;
+                    }
+                    acts.push(Act::ScheduleAnalyze(p.id));
+                }
             });
         });
-        ui.label(
-            RichText::new(shorten(&p.path.display().to_string(), 60))
-                .weak()
-                .size(10.5),
-        );
 
         match &p.state {
             PState::Loading => {
@@ -1544,44 +1766,8 @@ fn project_card(
                     ui.label(RichText::new("该工程没有序列").weak().size(12.0));
                     return;
                 }
-                let total = p.seqs.len();
-                let n_sel = p.seqs.iter().filter(|s| s.selected).count();
-                let busy_any = p
-                    .seqs
-                    .iter()
-                    .any(|s| matches!(s.status, SStatus::Analyzing));
-                ui.horizontal(|ui| {
-                    if ui.small_button("全选").clicked() {
-                        for s in p.seqs.iter_mut() {
-                            s.selected = true;
-                        }
-                        acts.push(Act::ScheduleAnalyze(p.id));
-                    }
-                    if ui.small_button("全不选").clicked() {
-                        for s in p.seqs.iter_mut() {
-                            s.selected = false;
-                        }
-                    }
-                    let text = if busy_any {
-                        "重新分析".to_string()
-                    } else {
-                        "分析所选".to_string()
-                    };
-                    if ui
-                        .add_enabled(n_sel > 0 && !busy_any, egui::Button::new(text).small())
-                        .on_hover_text("重新解析所选序列的字幕轨道")
-                        .clicked()
-                    {
-                        acts.push(Act::Analyze(p.id));
-                    }
-                    ui.label(
-                        RichText::new(format!(
-                            "{n_sel}/{total} 个序列 · Shift+点击 = 同层级/同名轨道批量切换"
-                        ))
-                        .weak()
-                        .size(10.5),
-                    );
-                });
+                // 导入工程后会自动分析，这里不再放「分析所选」按钮；
+                // 原来的「x/n 个序列 · Shift 提示」那行已并入标题行与「全选」的悬停。
                 ui.add_space(2.0);
 
                 let tree = &p.tree;
@@ -1742,6 +1928,8 @@ fn render_nodes(
                 let mut track_sync: Option<(usize, bool)> = None;
                 for t in seqs[pos].tracks.iter_mut() {
                     ui.horizontal(|ui| {
+                        // 预览按钮的字与「启用 / 已禁用」同大小（10.5），行不至于被撑高
+                        compact_text_sized(ui, 10.5);
                         ui.add_space(depth as f32 * 14.0 + 54.0);
                         let resp = ui
                             .add_enabled(seq_on, egui::Checkbox::new(&mut t.selected, ""))
@@ -1763,7 +1951,13 @@ fn render_nodes(
                                 .weak()
                                 .size(11.0),
                         );
-                        if ui.small_button("预览").clicked() {
+                        // 不能用 small_button：egui 的 Button::small() 会把文字样式
+                        // 强制改成 TextStyle::Body（全局 14 号），行内设置管不住它。
+                        // 这里直接给 RichText 指定字号，与「启用 / 已禁用」一致。
+                        if ui
+                            .add(egui::Button::new(RichText::new("预览").size(10.5)))
+                            .clicked()
+                        {
                             ctx.acts.push(Act::Preview {
                                 title: format!(
                                     "{} / {} / {}",
@@ -1892,16 +2086,6 @@ fn tri_checkbox(ui: &mut egui::Ui, state: Tri) -> egui::Response {
 
 // ---------------------------------------------------------------- 小工具
 
-fn shorten(s: &str, max: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max {
-        return s.to_string();
-    }
-    let head: String = chars[..max.saturating_sub(12)].iter().collect();
-    let tail: String = chars[chars.len() - 10..].iter().collect();
-    format!("{head}…{tail}")
-}
-
 /// 路径太长时只保留末尾（尽量从目录分隔符处断开），完整路径放到悬停提示里。
 fn tail_path(path: &str, max: usize) -> String {
     let chars: Vec<char> = path.chars().collect();
@@ -1916,6 +2100,112 @@ fn tail_path(path: &str, max: usize) -> String {
         .unwrap_or(start);
     let tail: String = chars[cut..].iter().collect();
     format!("…{tail}")
+}
+
+/// 树 / 工具条里的紧凑按钮：临时把按钮内边距压回去。
+/// 全局内边距放宽后，这些地方（树行、工具条）会被撑开，所以在它们的子 `ui` 里调一次。
+fn compact(ui: &mut egui::Ui) {
+    ui.spacing_mut().button_padding = egui::vec2(6.0, 1.0);
+}
+
+/// 树里的按钮再小一号字：正文大小会把「全选 / 预览」这些挤满整行。
+/// 传 `size` 可再收一档（轨道行与「启用 / 已禁用」同字号用 10.5）。
+fn compact_text_sized(ui: &mut egui::Ui, size: f32) {
+    compact(ui);
+    let family = ui
+        .style()
+        .text_styles
+        .get(&egui::TextStyle::Button)
+        .map(|f| f.family.clone())
+        .unwrap_or(egui::FontFamily::Proportional);
+    ui.style_mut()
+        .text_styles
+        .insert(egui::TextStyle::Button, egui::FontId::new(size, family));
+}
+
+/// 项目卡片标题栏的图标按钮：方框 + 对勾（全选）或叉（全不选）。
+/// 不用 ✔/✘ 字符——缺中文字体时这些符号可能变方框，手绘最稳。
+#[derive(Clone, Copy)]
+enum IconMark {
+    Check,
+    Cross,
+}
+
+fn icon_button(ui: &mut egui::Ui, mark: IconMark) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(21.0, 19.0), egui::Sense::click());
+    let visuals = ui.style().interact(&resp);
+    // 悬停 / 按下时垫一层底色，让它看起来像按钮
+    if resp.hovered() || resp.is_pointer_button_down_on() {
+        ui.painter()
+            .rect_filled(rect.expand(2.0), 5.0, visuals.bg_fill);
+    }
+    let stroke = egui::Stroke::new(1.4_f32, visuals.fg_stroke.color);
+    let box_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(12.0, 12.0));
+    ui.painter().rect_stroke(box_rect, 2.5, stroke);
+    match mark {
+        IconMark::Check => {
+            let pts = [
+                egui::pos2(box_rect.left() + 2.5, box_rect.center().y + 1.0),
+                egui::pos2(box_rect.center().x - 0.5, box_rect.bottom() - 3.5),
+                egui::pos2(box_rect.right() - 2.5, box_rect.top() + 3.5),
+            ];
+            ui.painter().add(egui::Shape::line(pts.to_vec(), stroke));
+        }
+        IconMark::Cross => {
+            let a = egui::pos2(box_rect.left() + 3.5, box_rect.top() + 3.5);
+            let b = egui::pos2(box_rect.right() - 3.5, box_rect.bottom() - 3.5);
+            let c = egui::pos2(box_rect.right() - 3.5, box_rect.top() + 3.5);
+            let d = egui::pos2(box_rect.left() + 3.5, box_rect.bottom() - 3.5);
+            ui.painter().add(egui::Shape::line(vec![a, b], stroke));
+            ui.painter().add(egui::Shape::line(vec![c, d], stroke));
+        }
+    }
+    resp
+}
+
+/// 根据当前明暗主题取一组蓝调配色（底色、文字色）
+fn blue_pair(ui: &egui::Ui) -> (Color32, Color32) {
+    if ui.visuals().dark_mode {
+        (BLUE_SOFT_DARK, BLUE_TEXT_DARK)
+    } else {
+        (BLUE_SOFT, BLUE_TEXT)
+    }
+}
+
+/// 步骤编号色块：① ② ③ 三步流程的视觉锚点。
+/// 用「小色块 + 数字」而不是裸的 ① 字符——后者在缺中文字体时会显示成方框。
+fn step_chip(ui: &mut egui::Ui, n: u8, title: &str) -> egui::Response {
+    let (bg, fg) = blue_pair(ui);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 5.0, bg);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        n.to_string(),
+        egui::FontId::proportional(11.0),
+        fg,
+    );
+    let label = ui.label(RichText::new(title).strong());
+    ui.add_space(6.0);
+    resp.union(label)
+}
+
+/// 右上角那种「圆圈 ?」提示，用来把常驻的长说明收进悬停里
+fn hint_mark(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(15.0, 15.0), egui::Sense::hover());
+    ui.painter().circle_stroke(
+        rect.center(),
+        6.5,
+        egui::Stroke::new(1.0_f32, ui.visuals().weak_text_color()),
+    );
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "?",
+        egui::FontId::proportional(10.0),
+        ui.visuals().text_color(),
+    );
+    resp
 }
 
 fn truncate_lines(s: &str, n: usize) -> String {
@@ -2035,16 +2325,35 @@ fn install_fonts(ctx: &egui::Context) -> bool {
 }
 
 fn apply_style(ctx: &egui::Context) {
-    let mut style = (*ctx.style()).clone();
-    style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-    style.spacing.button_padding = egui::vec2(10.0, 5.0);
-    if let Some(f) = style.text_styles.get_mut(&egui::TextStyle::Body) {
-        f.size = 14.0;
-    }
-    if let Some(f) = style.text_styles.get_mut(&egui::TextStyle::Button) {
-        f.size = 13.5;
-    }
-    ctx.set_style(style);
+    // 必须同时改「明 / 暗」两套样式：`ctx.set_style` 只改当前主题那一套，
+    // 而 eframe 启动后会按系统主题再切一次，切过去就变回默认样式了
+    // （之前按钮内边距怎么改都没反应，就是这个原因）。
+    // `small_button` 会把纵向内边距清零，所以树里的「全选 / 预览」不会被撑高。
+    ctx.all_styles_mut(|style| {
+        style.spacing.item_spacing = egui::vec2(9.0, 6.0);
+        // egui 默认 (4,1) 太贴边，文字像被框挤住；留出呼吸又不至于和主按钮一样高
+        style.spacing.button_padding = egui::vec2(14.0, 7.0);
+        if let Some(f) = style.text_styles.get_mut(&egui::TextStyle::Body) {
+            f.size = 14.0;
+        }
+        if let Some(f) = style.text_styles.get_mut(&egui::TextStyle::Button) {
+            f.size = 13.5;
+        }
+        // 圆角从默认 4 提到 6：按钮、输入框、group 边框都柔和一点
+        let rounding = egui::Rounding::same(6.0);
+        for w in [
+            &mut style.visuals.widgets.noninteractive,
+            &mut style.visuals.widgets.inactive,
+            &mut style.visuals.widgets.hovered,
+            &mut style.visuals.widgets.active,
+            &mut style.visuals.widgets.open,
+        ] {
+            w.rounding = rounding;
+        }
+        // 分隔线调淡：原来和 group 边框同重，整屏「线太多」
+        style.visuals.widgets.noninteractive.bg_stroke =
+            egui::Stroke::new(1.0_f32, style.visuals.weak_text_color().gamma_multiply(0.4));
+    });
 }
 
 #[cfg(test)]

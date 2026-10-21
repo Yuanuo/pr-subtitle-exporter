@@ -17,7 +17,7 @@ fn main() -> eframe::Result<()> {
     // 窗口/任务栏图标（exe 文件图标由 build.rs 里的 windres 资源提供）
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_inner_size([1240.0, 820.0])
-        .with_min_inner_size([960.0, 600.0])
+        .with_min_inner_size([960.0, 640.0])
         .with_title(&title);
     if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")) {
         viewport = viewport.with_icon(icon);
